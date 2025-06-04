@@ -218,7 +218,7 @@ foreach ($image in $images) {
         }
         catch {
             Write-Host "Error: Failed to pull image $image. Check registry authentication or image name."
-            Write-Host "Tip: Run 'docker login nexus-registry.project1.kbstar-st.com' if authentication is required."
+            Write-Host "Tip: Run 'docker login <registry>' if authentication is required."
             $errorDetails = "Failed to pull image: $image`n$($_.Exception.Message)"
             $errorDetails | Out-File -FilePath $logFile -Append
             $results += [PSCustomObject]@{

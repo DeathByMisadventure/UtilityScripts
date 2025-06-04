@@ -204,7 +204,7 @@ while IFS= read -r image; do
         echo "Warning: Image $image not found locally. Attempting to pull..." >&2
         if ! docker pull "$image" >/dev/null 2>&1; then
             echo "Error: Failed to pull image $image. Check registry authentication or image name." >&2
-            echo "Tip: Run 'docker login nexus-registry.project1.kbstar-st.com' if authentication is required." >&2
+            echo "Tip: Run 'docker login <registry>' if authentication is required." >&2
             log_error "Failed to pull image: $image"
             printf '"%s","%s","%s","%s","%s","%s","%s","%s","%s"\n' \
                 "$stripped_image" "" "" "" "" "" "Error: Failed to pull image" "" "" >> "$csv_file"
