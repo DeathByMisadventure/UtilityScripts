@@ -22,7 +22,6 @@
         .LINK
         Online version: https://github.com/DeathByMisadventure/UtilityScripts
     #>
-
 # Command-line arguments
 param (
     [Parameter(Position = 0)]
@@ -37,7 +36,9 @@ param (
     [string]$ImageFilter = "",
     [Parameter()]
     [ValidateSet("Critical", "High", "Medium", "Low", "Negligible", "Unknown")]
-    [string]$MinSeverity = "High"
+    [string]$MinSeverity = "High",
+    [Parameter(ValueFromRemainingArguments)]
+    [string[]]$RemainingArgs = @()
 )
 
 # Function to format a number to two significant digits
@@ -67,9 +68,12 @@ function Format-SignificantDigits {
     }
 }
 
+# Capture additional arguments
+$additionalArgs = $RemainingArgs
+
 # Display help message if no arguments provided
 if ([string]::IsNullOrEmpty($SourceType)) {
-    Write-Host "Usage: grype-chart-scan.ps1 [helm / compose] [path / compose-file] [-ImageFilter <string>] [-MinSeverity <string>]"
+    Write-Host "Usage: grype-chart-scan.ps1 [helm / compose] [path / compose-file] [-ImageFilter <string>] [-MinSeverity <string>] [additional arguments]"
     Write-Host "    helm / compose - (required) Type of input, helm chart or docker compose"
     Write-Host "    path / compose-file - (optional)"
     Write-Host "        if helm, the path to the chart defaults current folder"
@@ -79,6 +83,9 @@ if ([string]::IsNullOrEmpty($SourceType)) {
     Write-Host "    -MinSeverity <string> - (optional) Minimum vulnerability severity to include (Critical, High, Medium, Low, Negligible, Unknown), defaults to 'High'"
     Write-Host "        Includes specified severity and higher (e.g., -MinSeverity Medium includes Medium, High, Critical)"
     Write-Host "        Example: -MinSeverity Medium"
+    Write-Host "    additional arguments - (optional) Additional arguments to pass to helm or docker compose commands"
+    Write-Host "        Example for helm: --set key=value --namespace mynamespace"
+    Write-Host "        Example for compose: --project-name myproject"
     Write-Host "Note: Use a space between parameter names and values (e.g., -ImageFilter alert-suite, not -ImageFilter=alert-suite)"
     exit 0
 }
@@ -91,6 +98,7 @@ Write-Debug "SourceType: '$SourceType'"
 Write-Debug "SourcePath: '$SourcePath'"
 Write-Debug "ImageFilter: '$ImageFilter'"
 Write-Debug "MinSeverity: '$MinSeverity'"
+Write-Debug "AdditionalArgs: '$additionalArgs'"
 
 # Set default SourcePath based on SourceType
 if (-not $SourcePath) {
@@ -141,10 +149,9 @@ else {
     }
 }
 
-# Generate dynamic XLSX file name based on current month and year
-$month = (Get-Date).ToString("MMMM").ToLower()
-$year = (Get-Date).Year
-$xlsxFile = "grype-$month-$year.xlsx"
+# Generate dynamic XLSX file name based on current date
+$date = Get-Date -Format "MM-dd-yyyy"
+$xlsxFile = "grype-$date.xlsx"
 
 # Initialize results array
 $results = @()
@@ -165,7 +172,9 @@ $severitiesToInclude = $severityPriority.Keys | Where-Object { $severityPriority
 
 # Get unique images from specified source, applying filter if provided
 if ($SourceType -eq "helm") {
-    $images = helm template test $SourcePath | Select-String 'image:' |
+    $helmCommand = "helm template test $SourcePath $additionalArgs"
+    Write-Debug "Executing: $helmCommand"
+    $images = Invoke-Expression $helmCommand | Select-String 'image:' |
     ForEach-Object { $_ -replace '^\s*image:\s*', '' -replace '\s*$', '' }
     if (-not [string]::IsNullOrEmpty($ImageFilter)) {
         $images = $images | Where-Object { $_ -match [regex]::Escape($ImageFilter) }
@@ -173,7 +182,9 @@ if ($SourceType -eq "helm") {
     $images = $images | Sort-Object -Unique
 }
 else {
-    $images = docker compose -f $SourcePath config --format yaml | Select-String 'image:' |
+    $composeCommand = "docker compose -f $SourcePath config $additionalArgs --format yaml"
+    Write-Debug "Executing: $composeCommand"
+    $images = Invoke-Expression $composeCommand | Select-String 'image:' |
     ForEach-Object { $_ -replace '^\s*image:\s*', '' -replace '\s*$', '' }
     if (-not [string]::IsNullOrEmpty($ImageFilter)) {
         $images = $images | Where-Object { $_ -match [regex]::Escape($ImageFilter) }
@@ -205,6 +216,7 @@ foreach ($image in $images) {
             Severity         = "Error: Invalid image name format"
             EPSS             = ""
             Risk             = ""
+            Source           = "ironbank"
         }
         continue
     }
@@ -218,7 +230,7 @@ foreach ($image in $images) {
         }
         catch {
             Write-Host "Error: Failed to pull image $image. Check registry authentication or image name."
-            Write-Host "Tip: Run 'docker login <registry>' if authentication is required."
+            Write-Host "Tip: Run 'docker login nexus-registry.project1.kbstar-st.com' if authentication is required."
             $errorDetails = "Failed to pull image: $image`n$($_.Exception.Message)"
             $errorDetails | Out-File -FilePath $logFile -Append
             $results += [PSCustomObject]@{
@@ -231,14 +243,15 @@ foreach ($image in $images) {
                 Severity         = "Error: Failed to pull image"
                 EPSS             = ""
                 Risk             = ""
+                Source           = "ironbank"
             }
             continue
         }
     }
 
-    # Run grype with JSON output, capturing stderr separately
+    # Run grype with JSON output, capturing stderr separately, without specifying a container name
     try {
-        $scanOutputRaw = docker run --rm --volume /var/run/docker.sock:/var/run/docker.sock --name Grype anchore/grype:v0.92.2 `
+        $scanOutputRaw = docker run --rm --volume /var/run/docker.sock:/var/run/docker.sock anchore/grype:latest `
             --sort-by severity --output json --quiet $image 2>&1
         $scanOutput = $scanOutputRaw | ConvertFrom-Json -ErrorAction Stop
     }
@@ -257,6 +270,7 @@ foreach ($image in $images) {
             Severity         = "Error processing scan output"
             EPSS             = ""
             Risk             = ""
+            Source           = "ironbank"
         }
         continue
     }
@@ -278,16 +292,21 @@ foreach ($image in $images) {
                 $riskValue = $match.vulnerability.risk
             }
 
+            # Determine Source based on Type
+            $artifactType = if ($null -ne $match.artifact.type) { $match.artifact.type } else { "" }
+            $sourceValue = if ($artifactType.ToLower() -eq "java-archive") { "framework" } else { "ironbank" }
+
             $results += [PSCustomObject]@{
                 Image            = $strippedImage
                 Package          = if ($null -ne $match.artifact.name) { $match.artifact.name } else { "" }
                 VersionInstalled = if ($null -ne $match.artifact.version) { $match.artifact.version } else { "" }
                 FixedIn          = if ($match.vulnerability.fix.versions) { $match.vulnerability.fix.versions -join "," } else { "" }
-                Type             = if ($null -ne $match.artifact.type) { $match.artifact.type } else { "" }
+                Type             = $artifactType
                 VulnerabilityID  = if ($null -ne $match.vulnerability.id) { $match.vulnerability.id } else { "" }
-                Severity         = if ($null -ne $match.vulnerability.severity) { $match.vulnerability.severity } else { "" }
+                Severity         = if ($null -ne $match.vulnerability.severity) { "$($match.vulnerability.severity)" } else { "" }
                 EPSS             = Format-SignificantDigits $epssValue
                 Risk             = Format-SignificantDigits $riskValue
+                Source           = $sourceValue
             }
         }
     }
@@ -303,14 +322,31 @@ foreach ($image in $images) {
             Severity         = "No vulnerabilities found with severity $MinSeverity or higher"
             EPSS             = ""
             Risk             = ""
+            Source           = "ironbank"
         }
     }
 }
 
-# Export results to XLSX
+# Export results to XLSX with conditional formatting, AutoFilter, and text format for Severity
 if ($results) {
-    $results | Export-Excel -Path $xlsxFile -WorksheetName "Vulnerabilities" -AutoSize -FreezeTopRow -BoldTopRow
-    Write-Host "Processing complete. XLSX saved to $xlsxFile"
+    $conditionalFormats = @(
+        # Severity formatting for column G (entire row)
+        New-ConditionalText -ConditionalType Equal -Text "Critical" -ConditionalTextColor Black -BackgroundColor Red -Range "G1:G1048576"
+        New-ConditionalText -ConditionalType Equal -Text "High" -ConditionalTextColor Black -BackgroundColor Orange -Range "G1:G1048576"
+        New-ConditionalText -ConditionalType Equal -Text "Medium" -ConditionalTextColor Black -BackgroundColor Yellow -Range "G1:G1048576"
+        New-ConditionalText -ConditionalType Equal -Text "Low" -ConditionalTextColor Black -BackgroundColor LightGreen -Range "G1:G1048576"
+        New-ConditionalText -ConditionalType Equal -Text "Negligible" -ConditionalTextColor Black -BackgroundColor LightGray -Range "G1:G1048576"
+        New-ConditionalText -ConditionalType Equal -Text "Unknown" -ConditionalTextColor Black -BackgroundColor LightGray -Range "G1:G1048576"
+        New-ConditionalText -ConditionalType ContainsText -Text "Error" -ConditionalTextColor Black -BackgroundColor Purple -Range "G1:G1048576"
+        # Formatting for column J (individual cells)
+        New-ConditionalText -ConditionalType Equal -Text "ironbank" -ConditionalTextColor Black -BackgroundColor LightBlue -Range "J1:J1048576"
+        New-ConditionalText -ConditionalType Equal -Text "framework" -ConditionalTextColor Black -BackgroundColor LightGreen -Range "J1:J1048576"
+    )
+    $excelPackage = $results | Export-Excel -Path $xlsxFile -WorksheetName "Vulnerabilities" -AutoSize -FreezeTopRow -BoldTopRow -AutoFilter -ConditionalText $conditionalFormats -PassThru
+    $worksheet = $excelPackage.Workbook.Worksheets["Vulnerabilities"]
+    $worksheet.Cells["A:I"].Style.Numberformat.Format = "@"
+    Close-ExcelPackage $excelPackage
+    Write-Host "Processing complete. XLSX saved to $xlsxFile with conditional formatting applied for Severity (column G, text format) and Source (column J, populated based on Type). AutoFilter enabled on header row. Note: Severity values are prefixed with '' to avoid conflicts."
 }
 else {
     Write-Host "No results to export."
