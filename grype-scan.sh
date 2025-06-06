@@ -1,95 +1,120 @@
 #!/bin/bash
 
-# Usage function
+# Usage function for help message
 usage() {
-    echo "Usage: $0 [helm|compose] [path/compose-file] [--image-filter <string>] [--min-severity <string>]"
-    echo "    helm|compose - (required) Type of input, helm chart or docker compose"
-    echo "    path/compose-file - (optional)"
-    echo "        if helm, path to chart, defaults to current folder"
-    echo "        if compose, path to docker-compose.yaml type file, defaults to 'docker-compose.yaml'"
-    echo "    --image-filter <string> - (optional) Filter images containing this string, defaults to '' (no filter)"
-    echo "        Example: --image-filter alert-suite"
-    echo "    --min-severity <string> - (optional) Minimum vulnerability severity (Critical, High, Medium, Low, Negligible, Unknown), defaults to 'High'"
-    echo "        Includes specified severity and higher (e.g., --min-severity Medium includes Medium, High, Critical)"
-    echo "        Example: --min-severity Medium"
-    echo "Note: Use space between option names and values (e.g., --image-filter alert-suite, not --image-filter=alert-suite)"
+    echo "Usage: $0 [helm|compose] [path/compose-file] [-i <ImageFilter>] [-s <MinSeverity>] [-d|--debug] [additional arguments]"
+    echo "    helm / compose - (required) Type of input, helm chart or docker compose"
+    echo "    path / compose-file - (optional)"
+    echo "        if helm, the path to the chart defaults to current folder"
+    echo "        if compose, the path and file name to docker-compose.yaml type file"
+    echo "    -i <string> - (optional) Filter images containing this string, defaults to '' (no filter)"
+    echo "        Example: -i alert-suite"
+    echo "    -s <string> - (optional) Minimum vulnerability severity to include (Critical, High, Medium, Low, Negligible, Unknown), defaults to 'High'"
+    echo "        Includes specified severity and higher (e.g., -s Medium includes Medium, High, Critical)"
+    echo "        Example: -s Medium"
+    echo "    -d, --debug - (optional) Enable debug output"
+    echo "        Example: -d or --debug"
+    echo "    additional arguments - (optional) Additional arguments to pass to helm or docker compose commands"
+    echo "        Example for helm: --set key=value --namespace mynamespace"
+    echo "        Example for compose: --project-name myproject"
+    echo "Note: Use a space between parameter names and values (e.g., -i alert-suite, not -i=alert-suite)"
     exit 0
 }
 
-# Function to format number to two significant digits
+# Debug function to conditionally output messages
+debug() {
+    if [ "$DEBUG" = true ]; then
+        echo "DEBUG: $*" >&2
+    fi
+}
+
+# Function to format a number to two significant digits
 format_significant_digits() {
     local value="$1"
     if [ -z "$value" ]; then
         echo ""
         return
     fi
-    if [ "$value" = "0" ]; then
-        echo "0.0"
-        return
-    fi
-    # Use awk to compute two significant digits
-    echo "$value" | awk '{
-        if ($1 == 0) { print "0.0"; next }
-        abs = ($1 < 0 ? -$1 : $1)
-        mag = int(log(abs)/log(10))
-        shift = 1 - mag
-        scale = 10^shift
-        rounded = sprintf("%.1f", $1 * scale)
-        printf("%." shift "f\n", rounded)
-    }' | sed 's/\.0*$//'
+    # Use bc and awk to mimic PowerShell's Format-SignificantDigits
+    result=$(echo "$value" | awk '
+        function round(num, places) {
+            factor = 10^places
+            return int(num * factor + 0.5) / factor
+        }
+        {
+            if ($1 == 0) {
+                print "0.0"
+                exit
+            }
+            abs = ($1 < 0) ? -$1 : $1
+            mag = int(log(abs)/log(10))
+            shift = 1 - mag
+            scale = 10^shift
+            rounded = round($1 * scale, 1)
+            printf "%." shift "f\n", rounded
+        }' | sed 's/\.0*$//;s/\.$//')
+    echo "$result"
 }
 
-# Initialize log file variable
-log_file=""
-
-# Function to log errors
-log_error() {
-    local message="$1"
-    if [ -z "$log_file" ]; then
-        log_file="grype-scan-error-$(date +%Y%m%d-%H%M%S).log"
-        echo "Error log created at $log_file" >&2
-    fi
-    echo "$message" >> "$log_file"
-}
+# Initialize debug flag
+DEBUG=false
 
 # Parse arguments
-source_type=""
-source_path=""
 image_filter=""
 min_severity="High"
+source_type=""
+source_path=""
+additional_args=""
 
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        helm|compose)
-            source_type="$1"
-            shift
-            ;;
-        --image-filter)
-            image_filter="$2"
-            shift 2
-            ;;
-        --min-severity)
-            min_severity="$2"
-            shift 2
-            ;;
-        *)
-            if [ -z "$source_path" ]; then
-                source_path="$1"
-                shift
-            else
-                echo "Error: Unexpected argument '$1'"
-                usage
-            fi
-            ;;
-    esac
-done
-
-# Validate source_type
-if [ -z "$source_type" ]; then
+# Positional arguments
+if [ $# -eq 0 ]; then
     usage
 fi
+source_type="$1"
+shift
+if [ $# -gt 0 ]; then
+    source_path="$1"
+    shift
+fi
 
-# Set default source_path
+# Options
+while getopts "i:s:d" opt; do
+    case $opt in
+        i) image_filter="$OPTARG" ;;
+        s) min_severity="$OPTARG" ;;
+        d) DEBUG=true ;;
+        \?) echo "Invalid option -$OPTARG" >&2; exit 1 ;;
+    esac
+done
+shift $((OPTIND-1))
+
+# Handle long option --debug
+while [ $# -gt 0 ]; do
+    if [ "$1" = "--debug" ]; then
+        DEBUG=true
+        shift
+    else
+        additional_args="$additional_args $1"
+        shift
+    fi
+done
+additional_args=${additional_args# }
+
+# Validate SourceType
+source_type=$(echo "$source_type" | tr -d '[:space:]')
+if [ "$source_type" != "helm" ] && [ "$source_type" != "compose" ]; then
+    echo "Error: SourceType must be 'helm' or 'compose'." >&2
+    exit 1
+fi
+
+# Debug logging
+debug "SourceType: '$source_type'"
+debug "SourcePath: '$source_path'"
+debug "ImageFilter: '$image_filter'"
+debug "MinSeverity: '$min_severity'"
+debug "AdditionalArgs: '$additional_args'"
+
+# Set default SourcePath
 if [ -z "$source_path" ]; then
     if [ "$source_type" = "helm" ]; then
         source_path="."
@@ -98,31 +123,36 @@ if [ -z "$source_path" ]; then
     fi
 fi
 
-# Normalize source_path (replace leading \ with ./)
-source_path="${source_path#\\}"
-if [[ "$source_path" != /* && "$source_path" != ./* ]]; then
-    source_path="./$source_path"
-fi
+# Normalize SourcePath (replace leading backslash with ./)
+source_path=$(echo "$source_path" | sed 's|^\\|./|')
+
+# Create log file
+log_file="grype-scan-error-$(date +%Y%m%d-%H%M%S).log"
+debug "Logging errors to $log_file"
 
 # Check prerequisites
-if ! command -v helm >/dev/null; then
+if ! command -v helm >/dev/null 2>&1; then
     echo "Error: helm is not installed." >&2
     exit 1
 fi
-if ! command -v docker >/dev/null; then
+if ! command -v docker >/dev/null 2>&1; then
     echo "Error: docker is not installed." >&2
     exit 1
 fi
-if [ "$source_type" = "compose" ] && ! command -v docker-compose >/dev/null; then
+if [ "$source_type" = "compose" ] && ! command -v docker-compose >/dev/null 2>&1; then
     echo "Error: docker-compose is not installed. Required for 'compose' source type." >&2
     exit 1
 fi
-if ! command -v jq >/dev/null; then
-    echo "Error: jq is not installed. Install it using your package manager (e.g., 'apt install jq' or 'brew install jq')." >&2
+if ! command -v jq >/dev/null 2>&1; then
+    echo "Error: jq is not installed. Install it using 'sudo apt-get install jq' or equivalent." >&2
+    exit 1
+fi
+if ! command -v bc >/dev/null 2>&1; then
+    echo "Error: bc is not installed. Install it using 'sudo apt-get install bc' or equivalent." >&2
     exit 1
 fi
 
-# Validate source_path
+# Validate SourcePath
 if [ "$source_type" = "helm" ]; then
     if [ ! -d "$source_path" ]; then
         echo "Error: Helm chart path '$source_path' does not exist or is not a directory." >&2
@@ -135,13 +165,26 @@ else
     fi
 fi
 
-# Generate CSV file name
-month=$(date +%B | tr '[:upper:]' '[:lower:]')
-year=$(date +%Y)
-csv_file="grype-$month-$year.csv"
+# Validate MinSeverity
+valid_severities=("Critical" "High" "Medium" "Low" "Negligible" "Unknown")
+min_severity_valid=false
+for sev in "${valid_severities[@]}"; do
+    if [ "${min_severity,,}" = "${sev,,}" ]; then
+        min_severity_valid=true
+        break
+    fi
+done
+if [ "$min_severity_valid" = false ]; then
+    echo "Error: Invalid MinSeverity '$min_severity'. Must be one of: ${valid_severities[*]}." >&2
+    exit 1
+fi
 
-# Initialize CSV
-echo "Image,Package,VersionInstalled,FixedIn,Type,VulnerabilityID,Severity,EPSS,Risk" > "$csv_file"
+# Generate dynamic CSV file name based on current date
+date_str=$(date +%m-%d-%Y)
+csv_file="grype-$date_str.csv"
+
+# Initialize results array (will append to CSV directly)
+echo '"Image","Package","VersionInstalled","FixedIn","Type","VulnerabilityID","Severity","EPSS","Risk","Source"' > "$csv_file"
 
 # Define severity hierarchy
 declare -A severity_priority=(
@@ -153,111 +196,128 @@ declare -A severity_priority=(
     ["Negligible"]=0
 )
 
-# Validate min_severity
-if [[ ! ${severity_priority[$min_severity]} ]]; then
-    echo "Error: Invalid --min-severity '$min_severity'. Must be one of: Critical, High, Medium, Low, Negligible, Unknown" >&2
-    exit 1
-fi
-
-# Get severities to include
-min_priority="${severity_priority[$min_severity]}"
+# Get severities to include based on MinSeverity
+min_priority=${severity_priority["$min_severity"]}
 severities_to_include=""
-for severity in "${!severity_priority[@]}"; do
-    priority="${severity_priority[$severity]}"
-    if [ "$(echo "$priority >= $min_priority" | bc -l)" -eq 1 ]; then
-        severities_to_include="$severities_to_include $severity"
+for sev in "${!severity_priority[@]}"; do
+    sev_priority=${severity_priority["$sev"]}
+    if [ -n "$sev_priority" ] && [ -n "$min_priority" ] && [ $(echo "$sev_priority >= $min_priority" | bc -l) -eq 1 ]; then
+        severities_to_include="$severities_to_include,$sev"
     fi
 done
+# Remove leading comma
+severities_to_include=${severities_to_include#,}
 
-# Get unique images
+# Get unique images from specified source
 if [ "$source_type" = "helm" ]; then
-    images=$(helm template test "$source_path" | grep 'image:' | sed -E 's/^\s*image:\s*//; s/\s*$//' | sort -u)
+    helm_command="helm template test $source_path $additional_args"
+    debug "Executing: $helm_command"
+    images=$(eval "$helm_command" | grep 'image:' | sed -E 's/^\s*image:\s*//;s/\s*$//' | sort -u)
 else
-    images=$(docker compose -f "$source_path" config --format yaml | grep 'image:' | sed -E 's/^\s*image:\s*//; s/\s*$//' | sort -u)
+    compose_command="docker compose -f $source_path config $additional_args --format yaml"
+    debug "Executing: $compose_command"
+    images=$(eval "$compose_command" | grep 'image:' | sed -E 's/^\s*image:\s*//;s/\s*$//' | sort -u)
 fi
 
+# Apply ImageFilter if provided
 if [ -n "$image_filter" ]; then
     images=$(echo "$images" | grep -E "$image_filter")
 fi
 
 if [ -z "$images" ]; then
-    echo "Error: No images found in $source_type output${image_filter:+ with filter '$image_filter'}" >&2
+    echo "Error: No images found in $source_type output${image_filter:+ with filter '$image_filter'}." >&2
     exit 1
 fi
 
 # Process each image
 while IFS= read -r image; do
+    [ -z "$image" ] && continue
     echo "Scanning image: $image"
-    stripped_image="${image##*/}"
+    # Strip the part of image up to and including the first /
+    stripped_image=$(echo "$image" | sed 's|^[^/]+/||')
 
-    # Validate image name
-    if ! echo "$image" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9._/-]*(:[a-zA-Z0-9._-]+)?$'; then
+    # Validate image name (basic check)
+    if ! echo "$image" | grep -E '^[a-zA-Z0-9][a-zA-Z0-9._/-]*(:[a-zA-Z0-9._-]+)?$' >/dev/null; then
         echo "Error: Invalid image name format: $image" >&2
-        log_error "Invalid image name format: $image"
-        printf '"%s","%s","%s","%s","%s","%s","%s","%s","%s"\n' \
-            "$stripped_image" "" "" "" "" "" "Error: Invalid image name format" "" "" >> "$csv_file"
+        echo "Invalid image name format: $image" >> "$log_file"
+        echo "\"$stripped_image\",\"\",\"\",\"\",\"\",\"\",\"Error: Invalid image name format\",\"\",\"\",\"ironbank\"" >> "$csv_file"
         continue
     fi
 
-    # Check if image exists
+    # Check if image is accessible
     if ! docker image inspect "$image" >/dev/null 2>&1; then
         echo "Warning: Image $image not found locally. Attempting to pull..." >&2
         if ! docker pull "$image" >/dev/null 2>&1; then
             echo "Error: Failed to pull image $image. Check registry authentication or image name." >&2
-            echo "Tip: Run 'docker login <registry>' if authentication is required." >&2
-            log_error "Failed to pull image: $image"
-            printf '"%s","%s","%s","%s","%s","%s","%s","%s","%s"\n' \
-                "$stripped_image" "" "" "" "" "" "Error: Failed to pull image" "" "" >> "$csv_file"
+            echo "Tip: Run 'docker login nexus-registry.project1.kbstar-st.com' if authentication is required." >&2
+            echo "Failed to pull image: $image" >> "$log_file"
+            echo "\"$stripped_image\",\"\",\"\",\"\",\"\",\"\",\"Error: Failed to pull image\",\"\",\"\",\"ironbank\"" >> "$csv_file"
             continue
         fi
     fi
 
-    # Run grype scan
-    scan_output=$(docker run --rm --volume /var/run/docker.sock:/var/run/docker.sock --name Grype anchore/grype:v0.92.2 \
+    # Run grype with JSON output
+    scan_output_raw=$(docker run --rm --volume /var/run/docker.sock:/var/run/docker.sock anchore/grype:latest \
         --sort-by severity --output json --quiet "$image" 2>&1)
-    if [ $? -ne 0 ] || ! echo "$scan_output" | jq -e . >/dev/null 2>&1; then
+    if ! echo "$scan_output_raw" | jq . >/dev/null 2>&1; then
         echo "Error processing JSON for $image: Invalid JSON output" >&2
-        log_error "Invalid JSON output for image: $image"
-        log_error "Raw output:"
-        log_error "$scan_output"
-        printf '"%s","%s","%s","%s","%s","%s","%s","%s","%s"\n' \
-            "$stripped_image" "" "" "" "" "" "Error processing scan output" "" "" >> "$csv_file"
+        echo "Invalid JSON output for image: $image\nRaw output:\n$scan_output_raw" >> "$log_file"
+        echo "Raw output logged to $log_file" >&2
+        echo "\"$stripped_image\",\"\",\"\",\"\",\"\",\"\",\"Error processing scan output\",\"\",\"\",\"ironbank\"" >> "$csv_file"
         continue
     fi
 
-    # Filter matches by severity
-    matches=$(echo "$scan_output" | jq -c '.matches[] | select(.vulnerability.severity | IN("'"${severities_to_include// /\",\"}"'"))')
-    if [ -n "$matches" ]; then
+    # Filter for vulnerabilities at or above MinSeverity
+    if [ -n "$severities_to_include" ]; then
+        scan_matches=$(echo "$scan_output_raw" | jq -c ".matches[] | select(.vulnerability.severity | IN(\"${severities_to_include//,/\",\"}\"))")
+    else
+        scan_matches=""
+    fi
+
+    if [ -n "$scan_matches" ]; then
         while IFS= read -r match; do
+            # Extract fields
             package=$(echo "$match" | jq -r '.artifact.name // ""')
-            version=$(echo "$match" | jq -r '.artifact.version // ""')
-            fixed_in=$(echo "$match" | jq -r '.vulnerability.fix.versions // empty | join(",")')
+            version_installed=$(echo "$match" | jq -r '.artifact.version // ""')
+            fixed_in=$(echo "$match" | jq -r 'if .vulnerability.fix.versions then .vulnerability.fix.versions | join(",") else "" end')
             type=$(echo "$match" | jq -r '.artifact.type // ""')
-            vuln_id=$(echo "$match" | jq -r '.vulnerability.id // ""')
+            vulnerability_id=$(echo "$match" | jq -r '.vulnerability.id // ""')
             severity=$(echo "$match" | jq -r '.vulnerability.severity // ""')
-            epss=$(echo "$match" | jq -r '.vulnerability.epss[0].epss // ""')
-            risk=$(echo "$match" | jq -r '.vulnerability.risk // ""')
+            epss_value=$(echo "$match" | jq -r '.vulnerability.epss[0].epss // ""')
+            risk_value=$(echo "$match" | jq -r '.vulnerability.risk // ""')
 
-            epss_formatted=$(format_significant_digits "$epss")
-            risk_formatted=$(format_significant_digits "$risk")
+            # Format EPSS and Risk
+            epss_formatted=$(format_significant_digits "$epss_value")
+            risk_formatted=$(format_significant_digits "$risk_value")
 
-            # Escape CSV fields
+            # Determine source based on Type
+            source_value="ironbank"
+            if [ "${type,,}" = "java-archive" ]; then
+                source_value="framework"
+            fi
+
+            # Escape quotes in fields for CSV
             package=$(echo "$package" | sed 's/"/""/g')
-            version=$(echo "$version" | sed 's/"/""/g')
+            version_installed=$(echo "$version_installed" | sed 's/"/""/g')
             fixed_in=$(echo "$fixed_in" | sed 's/"/""/g')
             type=$(echo "$type" | sed 's/"/""/g')
-            vuln_id=$(echo "$vuln_id" | sed 's/"/""/g')
+            vulnerability_id=$(echo "$vulnerability_id" | sed 's/"/""/g')
             severity=$(echo "$severity" | sed 's/"/""/g')
-            stripped_image=$(echo "$stripped_image" | sed 's/"/""/g')
+            epss_formatted=$(echo "$epss_formatted" | sed 's/"/""/g')
+            risk_formatted=$(echo "$risk_formatted" | sed 's/"/""/g')
+            source_value=$(echo "$source_value" | sed 's/"/""/g')
 
-            printf '"%s","%s","%s","%s","%s","%s","%s","%s","%s"\n' \
-                "$stripped_image" "$package" "$version" "$fixed_in" "$type" "$vuln_id" "$severity" "$epss_formatted" "$risk_formatted" >> "$csv_file"
-        done <<< "$matches"
+            echo "\"$stripped_image\",\"$package\",\"$version_installed\",\"$fixed_in\",\"$type\",\"$vulnerability_id\",\"$severity\",\"$epss_formatted\",\"$risk_formatted\",\"$source_value\"" >> "$csv_file"
+        done <<< "$scan_matches"
     else
-        echo "No vulnerabilities found for $image with severity $min_severity or higher."
-        printf '"%s","%s","%s","%s","%s","%s","%s","%s","%s"\n' \
-            "$stripped_image" "" "" "" "" "" "No vulnerabilities found with severity $min_severity or higher" "" "" >> "$csv_file"
+        echo "No vulnerabilities found for $image with severity $min_severity or higher." >&2
+        echo "\"$stripped_image\",\"\",\"\",\"\",\"\",\"\",\"No vulnerabilities found with severity $min_severity or higher\",\"\",\"\",\"ironbank\"" >> "$csv_file"
     fi
 done <<< "$images"
 
-echo "Processing complete. CSV saved to $csv_file"
+if [ -s "$csv_file" ]; then
+    echo "Processing complete. CSV saved to $csv_file."
+else
+    echo "No results to export." >&2
+    rm -f "$csv_file"
+fi
